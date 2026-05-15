@@ -116,6 +116,8 @@ Expected persistent volumes:
 - `redis-volatile-data`
 - `redis-durable-data`
 
+If Postgres reports unhealthy on the first deploy, check the Postgres container logs. A common cause is a `postgres-data` volume that was initialized during an earlier failed attempt before the Agenta databases existed. Postgres only runs files in `/docker-entrypoint-initdb.d` when the data directory is empty, so recreate the `postgres-data` volume for a fresh install or manually create the missing `agenta_oss_core`, `agenta_oss_tracing`, and `agenta_oss_supertokens` databases.
+
 ## Step 7: Verify
 
 Open your domain:
