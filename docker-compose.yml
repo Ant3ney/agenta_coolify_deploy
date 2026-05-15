@@ -1,0 +1,269 @@
+name: agenta-coolify
+
+x-agenta-api-image: &agenta-api-image
+  image: ghcr.io/agenta-ai/${AGENTA_API_IMAGE_NAME:-agenta-api}:${AGENTA_API_IMAGE_TAG:-latest}
+
+x-agenta-api-base: &agenta-api-base
+  <<: *agenta-api-image
+  restart: unless-stopped
+  environment: &agenta-env
+    AGENTA_LICENSE: ${AGENTA_LICENSE:-oss}
+    AGENTA_AUTH_KEY: ${AGENTA_AUTH_KEY:-change-me-auth-key}
+    AGENTA_CRYPT_KEY: ${AGENTA_CRYPT_KEY:-change-me-crypt-key}
+    AGENTA_WEB_URL: ${AGENTA_WEB_URL:-http://localhost:8080}
+    AGENTA_API_URL: ${AGENTA_API_URL:-http://localhost:8080/api}
+    AGENTA_SERVICES_URL: ${AGENTA_SERVICES_URL:-http://localhost:8080/services}
+    AGENTA_TELEMETRY_ENABLED: ${AGENTA_TELEMETRY_ENABLED:-false}
+    AGENTA_ALLOWED_DOMAINS: ${AGENTA_ALLOWED_DOMAINS:-}
+    AGENTA_SERVICES_MIDDLEWARE_CACHE_ENABLED: ${AGENTA_SERVICES_MIDDLEWARE_CACHE_ENABLED:-true}
+    AGENTA_SERVICES_SANDBOX_RUNNER: ${AGENTA_SERVICES_SANDBOX_RUNNER:-local}
+    DOCKER_NETWORK_MODE: ${DOCKER_NETWORK_MODE:-bridge}
+    POSTGRES_USER: username
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres-password}
+    POSTGRES_URI_CORE: postgresql+asyncpg://username:${POSTGRES_PASSWORD:-change-me-postgres-password}@postgres:5432/agenta_oss_core
+    POSTGRES_URI_TRACING: postgresql+asyncpg://username:${POSTGRES_PASSWORD:-change-me-postgres-password}@postgres:5432/agenta_oss_tracing
+    POSTGRES_URI_SUPERTOKENS: postgresql://username:${POSTGRES_PASSWORD:-change-me-postgres-password}@postgres:5432/agenta_oss_supertokens
+    ALEMBIC_AUTO_MIGRATIONS: ${ALEMBIC_AUTO_MIGRATIONS:-true}
+    ALEMBIC_CFG_PATH_CORE: /app/oss/databases/postgres/migrations/core/alembic.ini
+    ALEMBIC_CFG_PATH_TRACING: /app/oss/databases/postgres/migrations/tracing/alembic.ini
+    REDIS_URI: redis://redis-volatile:6379/0
+    REDIS_URI_VOLATILE: redis://redis-volatile:6379/0
+    REDIS_URI_DURABLE: redis://redis-durable:6381/0
+    SUPERTOKENS_API_KEY: ${SUPERTOKENS_API_KEY:-}
+    SUPERTOKENS_CONNECTION_URI: http://supertokens:3567
+    SUPERTOKENS_EMAIL_DISABLED: ${SUPERTOKENS_EMAIL_DISABLED:-false}
+    SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+    SENDGRID_FROM_ADDRESS: ${SENDGRID_FROM_ADDRESS:-}
+    GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+    GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    COHERE_API_KEY: ${COHERE_API_KEY:-}
+    GROQ_API_KEY: ${GROQ_API_KEY:-}
+    GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+    OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    PERPLEXITYAI_API_KEY: ${PERPLEXITYAI_API_KEY:-}
+    TOGETHERAI_API_KEY: ${TOGETHERAI_API_KEY:-}
+    POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
+  networks:
+    - agenta
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_started
+      services:
+        condition: service_started
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    expose:
+      - "80"
+    networks:
+      - agenta
+
+  web:
+    image: ghcr.io/agenta-ai/${AGENTA_WEB_IMAGE_NAME:-agenta-web}:${AGENTA_WEB_IMAGE_TAG:-latest}
+    command: sh -c "node ./oss/server.js"
+    restart: unless-stopped
+    environment: *agenta-env
+    networks:
+      - agenta
+
+  api:
+    <<: *agenta-api-base
+    command: >
+      newrelic-admin run-program gunicorn entrypoints.routers:app
+      --bind 0.0.0.0:8000
+      --worker-class uvicorn.workers.UvicornWorker
+      --workers 2
+      --worker-connections 1000
+      --backlog 2048
+      --keep-alive 5
+      --max-requests 10000
+      --max-requests-jitter 1000
+      --timeout 60
+      --graceful-timeout 30
+      --log-level info
+      --access-logfile -
+      --error-logfile -
+    environment:
+      <<: *agenta-env
+      SCRIPT_NAME: /api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      alembic:
+        condition: service_completed_successfully
+      redis-volatile:
+        condition: service_healthy
+      redis-durable:
+        condition: service_healthy
+
+  worker-evaluations:
+    <<: *agenta-api-base
+    command: ["newrelic-admin", "run-program", "python", "-m", "entrypoints.worker_evaluations"]
+    depends_on: &api-worker-deps
+      postgres:
+        condition: service_healthy
+      alembic:
+        condition: service_completed_successfully
+      redis-volatile:
+        condition: service_healthy
+      redis-durable:
+        condition: service_healthy
+
+  worker-tracing:
+    <<: *agenta-api-base
+    command: ["newrelic-admin", "run-program", "python", "-m", "entrypoints.worker_tracing"]
+    depends_on: *api-worker-deps
+
+  worker-webhooks:
+    <<: *agenta-api-base
+    command: ["newrelic-admin", "run-program", "python", "-m", "entrypoints.worker_webhooks"]
+    depends_on: *api-worker-deps
+
+  worker-events:
+    <<: *agenta-api-base
+    command: ["newrelic-admin", "run-program", "python", "-m", "entrypoints.worker_events"]
+    depends_on: *api-worker-deps
+
+  cron:
+    <<: *agenta-api-base
+    init: true
+    command: supercronic /app/crontab
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  alembic:
+    <<: *agenta-api-image
+    command: sh -c "python -m oss.databases.postgres.migrations.runner"
+    restart: "no"
+    environment: *agenta-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - agenta
+
+  services:
+    image: ghcr.io/agenta-ai/${AGENTA_SERVICES_IMAGE_NAME:-agenta-services}:${AGENTA_SERVICES_IMAGE_TAG:-latest}
+    command: >
+      newrelic-admin run-program gunicorn entrypoints.main:app
+      --bind 0.0.0.0:8080
+      --worker-class uvicorn.workers.UvicornWorker
+      --workers 2
+      --worker-connections 1000
+      --backlog 2048
+      --keep-alive 5
+      --max-requests 10000
+      --max-requests-jitter 1000
+      --timeout 60
+      --graceful-timeout 60
+      --log-level info
+      --access-logfile -
+      --error-logfile -
+    restart: unless-stopped
+    environment:
+      <<: *agenta-env
+      SCRIPT_NAME: /services
+    networks:
+      - agenta
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: username
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-postgres-password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-db-oss.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - agenta
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U username -d agenta_oss_core"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis-volatile:
+    image: redis:8
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly no
+      --save ""
+      --maxmemory 512mb
+      --maxmemory-policy volatile-lru
+      --port 6379
+    volumes:
+      - redis-volatile-data:/data
+    networks:
+      - agenta
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis-durable:
+    image: redis:8
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync no
+      --save ""
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+      --port 6381
+    volumes:
+      - redis-durable-data:/data
+    networks:
+      - agenta
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6381", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  supertokens:
+    image: registry.supertokens.io/supertokens/supertokens-postgresql
+    restart: unless-stopped
+    environment:
+      POSTGRESQL_CONNECTION_URI: postgresql://username:${POSTGRES_PASSWORD:-change-me-postgres-password}@postgres:5432/agenta_oss_supertokens
+      SUPERTOKENS_API_KEY: ${SUPERTOKENS_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      alembic:
+        condition: service_completed_successfully
+    networks:
+      - agenta
+    healthcheck:
+      test: >
+        bash -c 'exec 3<>/dev/tcp/127.0.0.1/3567 && echo -e "GET /hello HTTP/1.1\r\nhost: 127.0.0.1:3567\r\nConnection: close\r\n\r\n" >&3 && cat <&3 | grep "Hello"'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  agenta:
+
+volumes:
+  postgres-data:
+  redis-volatile-data:
+  redis-durable-data:

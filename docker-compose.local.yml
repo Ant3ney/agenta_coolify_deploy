@@ -1,0 +1,4 @@
+services:
+  nginx:
+    ports:
+      - "${AGENTA_HTTP_PORT:-8080}:80"
